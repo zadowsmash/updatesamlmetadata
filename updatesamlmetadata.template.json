@@ -1,0 +1,140 @@
+{
+    "AWSTemplateFormatVersion": "2010-09-09",
+    "Description": "Update SAML Metadata",
+    "Parameters": {
+        "adfsUrl": {
+            "Type": "String",
+            "Default": "example.adfs.url.com"
+        },
+        "serviceAccountIds": {
+            "Type": "String",
+            "Default": ""
+        },
+        "iamRoleName": {
+            "Type": "String",
+            "Default": ""
+        },
+        "externalId": {
+            "Type": "String",
+            "Default": ""
+        },
+        "samlProvider": {
+            "Type": "String",
+            "Default": ""
+        },
+        "EnableCron": {
+            "Type": "String",
+            "Default": "false"
+        }
+    },
+    "Conditions": {
+        "EnableCron": {
+            "Fn::Equals": [
+                {
+                    "Ref": "EnableCron"
+                },
+                "true"
+            ]
+        }
+    },
+    "Resources": {
+        "LambdaRole": {
+            "Type": "AWS::IAM::Role",
+            "Properties": {
+                "AssumeRolePolicyDocument": {
+                    "Version": "2012-10-17",
+                    "Statement": [
+                        {
+                            "Effect": "Allow",
+                            "Principal": {
+                                "Service": [
+                                    "lambda.amazonaws.com"
+                                ]
+                            },
+                            "Action": [
+                                "sts:AssumeRole"
+                            ]
+                        }
+                    ]
+                },
+                "ManagedPolicyArns": [
+                    "arn:aws:iam::aws:policy/AdministratorAccess"
+                ]
+            }
+        },
+        "updatesamlmetadata": {
+            "Type": "AWS::Lambda::Function",
+            "Properties": {
+                "Code": {
+                    "ZipFile": "const AWS = require('aws-sdk');\nconst https = require('https');\nconst sts = new AWS.STS();\nconst {\n  adfsUrl, iamRoleName, externalId, serviceAccountIds, samlProvider,\n} = process.env;\nconst downurl = `https://${adfsUrl}/FederationMetadata/2007-06/FederationMetadata.xml`;\nconst accountId = serviceAccountIds.replace(/\\s/g, '').split(',');\nexports.handler = (event, context, callback) => {\n  https.get(downurl, (res) => {\n      console.log('statusCode:', res.statusCode);\n      console.log('headers:', res.headers);\n    let downbody = '';\n    res.on('data', (d) => {\n      downbody += d;\n    });\n    res.on('end', () => {\n      accountId.forEach((accountIds) => {\n        const stsparams = {\n          DurationSeconds: 900,\n          ExternalId: externalId,\n          RoleArn: `arn:aws:iam::${accountIds}:role/${iamRoleName}`,\n          RoleSessionName: `${accountIds}-adfsmetadataupdate`,\n        };\n        sts.assumeRole(stsparams, (stserr, stsdata) => {\n          if (stserr) {\n            callback(stserr);\n          }\n          const iam = new AWS.IAM({\n            accessKeyId: stsdata.Credentials.AccessKeyId,\n            secretAccessKey: stsdata.Credentials.SecretAccessKey,\n            sessionToken: stsdata.Credentials.SessionToken,\n          });\n          const iamparams = {\n            SAMLMetadataDocument: downbody,\n            SAMLProviderArn: `arn:aws:iam::${accountIds}:saml-provider/${samlProvider}`,\n          };\n          iam.updateSAMLProvider(iamparams, (iamerr, iamdata) => {\n            if (!iamerr) console.log(iamdata);\n          });\n        });\n      });\n    });\n  }).on('error', (e) => {\n    console.error(e);\n  });\n};\n"
+                },
+                "Handler": "index.handler",
+                "MemorySize": "256",
+                "Timeout": "300",
+                "Role": {
+                    "Fn::GetAtt": [
+                        "LambdaRole",
+                        "Arn"
+                    ]
+                },
+                "Runtime": "nodejs8.10",
+                "Environment": {
+                    "Variables": {
+                        "adfsUrl": {
+                            "Ref": "adfsUrl"
+                        },
+                        "serviceAccountIds": {
+                            "Ref": "serviceAccountIds"
+                        },
+                        "iamRoleName": {
+                            "Ref": "iamRoleName"
+                        },
+                        "externalId": {
+                            "Ref": "externalId"
+                        },
+                        "samlProvider": {
+                            "Ref": "samlProvider"
+                        }
+                    }
+                }
+            }
+        },
+        "UpdateSAMLRule": {
+            "Type": "AWS::Events::Rule",
+            "Condition": "EnableCron",
+            "Properties": {
+                "Description": "Update SAML Metadata",
+                "ScheduleExpression": "rate(2 hours)",
+                "State": "ENABLED",
+                "Targets": [
+                    {
+                        "Arn": {
+                            "Fn::GetAtt": [
+                                "updatesamlmetadata",
+                                "Arn"
+                            ]
+                        },
+                        "Id": "refresh-metadata"
+                    }
+                ]
+            }
+        },
+        "PermissionForEventsToInvokeLambda": {
+            "Type": "AWS::Lambda::Permission",
+            "Condition": "EnableCron",
+            "Properties": {
+                "FunctionName": {
+                    "Ref": "updatesamlmetadata"
+                },
+                "Action": "lambda:InvokeFunction",
+                "Principal": "events.amazonaws.com",
+                "SourceArn": {
+                    "Fn::GetAtt": [
+                        "UpdateSAMLRule",
+                        "Arn"
+                    ]
+                }
+            }
+        }
+    }
+}
